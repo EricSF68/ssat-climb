@@ -2,6 +2,7 @@
 (() => {
 'use strict';
 const KEY = 'climb.v1';
+const APP_VERSION = '1.1';
 const TEST_DAY = new Date(2026, 11, 12);
 const DAY = 86400000;
 const INTERVALS = [0, 1, 2, 4, 7, 14]; // days per Leitner box
@@ -27,7 +28,7 @@ S.stats = Object.assign(fresh().stats, S.stats); S.mine = S.mine || {};
 function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
 
 // ---------- word bank ----------
-const BASE = {}; window.WORDS.forEach(e => BASE[e.w] = e);
+const BASE = {}; window.WORDS.forEach(e => { BASE[e.w] = e; const x = (window.EXTRA || {})[e.w]; if (x) { e.a = x[0]; e.c = x[1]; } });
 const entry = w => S.custom[w] || BASE[w];
 const isMine = w => !!(S.custom[w] || S.mine[w]);
 const allEntries = () => [...window.WORDS, ...Object.values(S.custom).filter(e => !BASE[e.w])];
@@ -59,8 +60,14 @@ function genSyn(w) {
   same.forEach(x => (x.s || []).slice(0, 2).forEach(c => cands.push(c)));
   cands = [...new Set(cands.map(c => c.toLowerCase()))].filter(c =>
     !near(c, [w, correct.toLowerCase()]) && !(e.s || []).map(t=>t.toLowerCase()).includes(c) && !c.includes(w) && c.split(' ').length <= 2);
-  const wrong = pick(cands, 4);
-  return { kind: 'syn', w, choices: shuffle([correct, ...wrong]), ans: correct, picked: null, t0: null, ms: null };
+  // SSAT-style trap: an opposite or a look/sound-alike, about 60% of the time
+  const traps = {};
+  const trapPool = [...(e.a || []).map(t => [t, 'opposite']), ...(e.c || []).map(t => [t, 'lookalike'])]
+    .filter(([t]) => !near(t.toLowerCase(), [w, correct.toLowerCase()]) && !(e.s || []).includes(t));
+  const chosen = trapPool.length && Math.random() < 0.6 ? pick(trapPool, 1) : [];
+  chosen.forEach(([t, k]) => traps[t] = k);
+  const wrong = [...chosen.map(x => x[0]), ...pick(cands.filter(c => !traps[c]), 4 - chosen.length)];
+  return { kind: 'syn', w, choices: shuffle([correct, ...wrong]), ans: correct, traps, picked: null, t0: null, ms: null };
 }
 function genDef(w) {
   const e = entry(w);
@@ -166,7 +173,7 @@ views.home = () => {
   const help = Object.values(S.custom).filter(e => e.lookup === 'failed').length;
   return `
   <header class="hero">
-    <div class="kicker">SSAT Climb</div>
+    <div class="topline"><div class="kicker">SSAT Climb</div><button class="qbtn" data-act="help" data-i="0" aria-label="How to use the app">?</button></div>
     <h1>${daysLeft()} days to test day</h1>
     <div class="alt"><span class="m">${al.a.toLocaleString()} m</span><span class="at">${esc(al.at)}${al.next ? ` → ${esc(al.next[1])}` : ''}</span></div>
     <div class="bar"><i style="width:${al.pct}%"></i></div>
@@ -227,7 +234,10 @@ function itemView(type, it) {
     let fb = '';
     if (it.picked != null) {
       const ok = it.picked === it.ans;
-      fb = `<div class="fb ${ok ? 'ok' : 'no'}">${ok ? 'Correct' : 'Not quite'}${!ok && it.ms < 6000 ? ` — that took ${Math.round(it.ms/1000)} s. Read all five choices first.` : ''}</div>${wordInfo(it.w)}
+      const trap = !ok && it.traps && it.traps[it.picked];
+      const trapMsg = trap === 'opposite' ? `<p class="trapmsg">Trap! “${esc(it.picked)}” is an <b>opposite</b> of ${esc(e.w)}. Test-makers love putting the opposite in the choices.</p>`
+        : trap === 'lookalike' ? `<p class="trapmsg">Trap! “${esc(it.picked)}” <b>looks or sounds like</b> ${esc(e.w)} but means something different.</p>` : '';
+      fb = `<div class="fb ${ok ? 'ok' : 'no'}">${ok ? 'Correct' : 'Not quite'}${!ok && it.ms < 6000 ? ` — that took ${Math.round(it.ms/1000)} s. Read all five choices first.` : ''}</div>${trapMsg}${wordInfo(it.w)}
         <button class="cta" data-act="next" data-type="${type}">Next</button>`;
     }
     return `<div class="qcard">${stem}</div><div class="choices">${ch}</div>${fb}`;
@@ -258,7 +268,7 @@ function itemView(type, it) {
 function wordInfo(w) {
   const e = entry(w); if (!e) return '';
   return `<div class="info"><p><b>${esc(e.w)}</b> <i>${esc(POS[e.p] || e.p || '')}</i> — ${esc(e.d || 'definition pending')}</p>
-    ${e.s && e.s.length ? `<p class="muted">Synonyms: ${esc(e.s.join(', '))}</p>` : ''}${e.r ? `<p class="muted">Tip: ${esc(e.r)}</p>` : ''}${e.e ? `<p class="ex">“${esc(e.e)}”</p>` : ''}</div>`;
+    ${e.s && e.s.length ? `<p class="muted">Synonyms: ${esc(e.s.join(', '))}</p>` : ''}${e.a && e.a.length ? `<p class="muted">Opposites: ${esc(e.a.join(', '))}</p>` : ''}${e.c && e.c.length ? `<p class="muted">Don’t confuse with: ${esc(e.c.join(', '))}</p>` : ''}${e.r ? `<p class="muted">Tip: ${esc(e.r)}</p>` : ''}${e.e ? `<p class="ex">“${esc(e.e)}”</p>` : ''}</div>`;
 }
 function learnCard(w, actions, kicker) {
   const e = entry(w);
@@ -298,12 +308,15 @@ views.progress = () => {
     <div class="stats3"><div><b>${al.a.toLocaleString()}</b><span>meters</span></div><div><b>${S.stats.streak}</b><span>day streak</span></div><div><b>${daysLeft()}</b><span>days left</span></div></div>
     <div class="stats3"><div><b>${pct(syn) ?? '—'}${pct(syn) != null ? '%' : ''}</b><span>synonyms (last ${syn.length})</span></div><div><b>${pct(ana) ?? '—'}${pct(ana) != null ? '%' : ''}</b><span>analogies (last ${ana.length})</span></div><div><b>${counts.m}</b><span>words mastered</span></div></div>
     <div class="card"><b>Analogies by bridge</b>${br}</div>
+    <button class="ghost wide" data-act="help" data-i="0">How to use the app</button>
     <details class="card parent"><summary>Parent tools</summary>
       <p class="muted">Progress lives only on this phone. Export a backup now and then.</p>
       <button class="ghost wide" data-act="export">Export progress backup</button>
       <button class="ghost wide" data-act="import">Import backup</button>
       <button class="ghost wide" data-act="exportwords">Share added words (for Claude)</button>
+      <button class="ghost wide" data-act="update">Check for updates</button>
       <button class="ghost wide danger" data-act="reset">Reset everything</button>
+      <p class="muted">Version ${APP_VERSION}</p>
       <input type="file" id="importfile" accept="application/json" hidden>
     </details>`;
 };
@@ -355,6 +368,9 @@ document.addEventListener('click', ev => {
       if (v === 'no') { p.box = 0; p.due = now(); }
       s.total++; advance(type); break; }
     case 'filter': S.ui.filter = el.dataset.v; save(); render(); break;
+    case 'help': openHelp(+el.dataset.i || 0); break;
+    case 'helpdone': S.ui.helpSeen = true; save(); closeSheet(); break;
+    case 'update': checkUpdate(true); break;
     case 'word': openWord(el.dataset.w); break;
     case 'addopen': openAdd(); break;
     case 'close': closeSheet(); break;
@@ -400,21 +416,27 @@ function resultHTML(w) {
   return `<p class="muted">Saved. Lookup will finish when you’re online.</p>`;
 }
 const POSMAP = { noun: 'n', verb: 'v', adjective: 'adj', adverb: 'adv' };
+function lev(a, b) { const d = Array.from({ length: a.length + 1 }, (_, i) => [i]); for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i-1][j] + 1, d[i][j-1] + 1, d[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+  return d[a.length][b.length]; }
 async function lookup(w, ui) {
   const e = S.custom[w]; if (!e) return;
   const enc = encodeURIComponent(w);
   const get = u => fetch(u, { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => undefined); // undefined = network failure
-  const [dict, syn, ml] = await Promise.all([
+  const [dict, syn, ml, ant, sl] = await Promise.all([
     get(`https://api.dictionaryapi.dev/api/v2/entries/en/${enc}`),
     get(`https://api.datamuse.com/words?rel_syn=${enc}&max=12`),
-    get(`https://api.datamuse.com/words?ml=${enc}&max=8`)]);
+    get(`https://api.datamuse.com/words?ml=${enc}&max=8`),
+    get(`https://api.datamuse.com/words?rel_ant=${enc}&max=6`),
+    get(`https://api.datamuse.com/words?sl=${enc}&md=f&max=25`)]);
   if (dict === undefined && syn === undefined) { if (ui) toast('Can’t reach the dictionary right now'); return; } // offline or blocked: stay pending, retry later
-  let d = '', p = '', ex = '', syns = [];
+  let d = '', p = '', ex = '', syns = [], ants = [];
   if (Array.isArray(dict) && dict[0] && dict[0].meanings) {
     const m = dict[0].meanings.find(x => POSMAP[x.partOfSpeech]) || dict[0].meanings[0];
     p = POSMAP[m.partOfSpeech] || ''; const def = m.definitions && m.definitions[0];
     d = def ? def.definition : ''; ex = def && def.example ? def.example : '';
     syns = [...(m.synonyms || []), ...((m.definitions || []).flatMap(x => x.synonyms || []))];
+    ants = [...(m.antonyms || []), ...((m.definitions || []).flatMap(x => x.antonyms || []))];
   }
   const ok1 = x => /^[a-z][a-z\-]*( [a-z]+)?$/.test(x) && x !== w && !x.includes(w);
   // rank: words both sources agree on, then the scored thesaurus list, then the rest
@@ -422,13 +444,23 @@ async function lookup(w, ui) {
   const dl = syns.map(x => x.toLowerCase());
   syns = [...new Set([...dm.filter(x => dl.includes(x)), ...dm, ...dl])].filter(ok1).slice(0, 5);
   if (!syns.length && Array.isArray(ml)) syns = ml.map(x => x.word.toLowerCase()).filter(ok1).slice(0, 3);
-  Object.assign(e, { d, p, e: ex, s: syns, lookup: (d || syns.length) ? 'ok' : 'failed' });
+  // opposites: both sources, minus anything that is also listed as a synonym
+  ants = [...new Set([...(Array.isArray(ant) ? ant.map(x => x.word) : []), ...ants].map(x => x.toLowerCase()))].filter(x => ok1(x) && !syns.includes(x)).slice(0, 3);
+  // look/sound-alikes: common real words only, not just another form of the same word
+  const SUF = new Set(['', 's', 'es', 'ed', 'd', 'ing', 'ly', 'y', 'ce', 'ness', 'ment', 'ity', 'ism', 'ion', 'ions', 'ist', 'er', 'ers', 'ies', 'ence', 'ance', 'ize', 'ise', 'ized', 'ised', 'ous', 'al']);
+  const derived = t => { let i = 0; while (i < t.length && i < w.length && t[i] === w[i]) i++; return i >= w.length - 3 && SUF.has(t.slice(i)) && SUF.has(w.slice(i)); };
+  const alikes = (Array.isArray(sl) ? sl : []).filter(x => {
+    const t = x.word.toLowerCase(); const f = parseFloat(((x.tags || []).find(g => g.startsWith('f:')) || 'f:0').slice(2));
+    return /^[a-z]+$/.test(t) && t !== w && f >= 1 && !derived(t) && !syns.includes(t) && !ants.includes(t) && lev(t, w) <= Math.max(2, Math.floor(w.length / 4));
+  }).map(x => x.word.toLowerCase()).slice(0, 2);
+  Object.assign(e, { d, p, e: ex, s: syns, a: ants, c: alikes, lookup: (d || syns.length) ? 'ok' : 'failed' });
   rebuildClusters(); save();
   if (S.ui.view === 'words' && !$('#sheet').classList.contains('on')) render();
   if (ui) openWord(w);
 }
 function retryPending() { if (!navigator.onLine) return; Object.values(S.custom).filter(e => e.lookup === 'pending').forEach(e => lookup(e.w)); }
 window.addEventListener('online', retryPending);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { retryPending(); checkUpdate(); } });
 
 function openWord(w) {
   const e = entry(w); const p = S.words[w] || { box: 0, right: 0, wrong: 0 };
@@ -440,7 +472,35 @@ function openWord(w) {
     ${S.custom[w] ? `<button class="ghost wide danger" data-act="remove" data-w="${esc(w)}">Remove</button>` : ''}</div>`;
   $('#sheet').classList.add('on');
 }
-$('#sheet').addEventListener('click', ev => { if (ev.target.id === 'sheet') closeSheet(); });
+$('#sheet').addEventListener('click', ev => { if (ev.target.id === 'sheet' && !$('.help')) closeSheet(); });
+
+// ---------- help / onboarding ----------
+const HELP = [
+  ['Welcome to SSAT Climb', `Your verbal trainer for the SSAT: <b>synonyms, analogies, and words you don’t know yet</b>. About 15–30 minutes a day, alongside your prep book.<br><br>It works <b>with no internet</b> once it’s installed, and it always remembers exactly where you stopped.`],
+  ['Today’s climb', `The big orange button on the Climb screen. Each round mixes <b>new word cards</b>, <b>synonym questions</b>, and <b>analogies</b>, picked from what you need most.<br><br>Missed words come back sooner. Words you know show up less often.`],
+  ['Sort your Test 1 words', `These are words from questions you missed on your practice test. For each one, tap <b>Know it</b>, <b>Sort of</b>, or <b>No idea</b>. Be honest — the ones you don’t know get practiced first.`],
+  ['Synonyms', `Pick the word that means the same thing. <b>Read all five choices</b> before tapping.<br><br>Watch for traps: an <b>opposite</b> of the word, or a word that <b>looks or sounds alike</b> (dubious vs. devious). The app tells you when you fell for one.`],
+  ['Analogies: bridge first', `<b>Step 1:</b> before you see the choices, pick how the two words are related — the “bridge.”<br><b>Step 2:</b> try that exact bridge on every choice.<br><br>The Bridge guide (Analogies screen, top right) lists all 15 bridges with examples.`],
+  ['Add a word — anytime', `See a word you don’t know — in your book, a practice test, anywhere? Tap the orange <b>＋ Word</b> button in the bottom bar. It works on every screen, even in the middle of a question, and you land right back where you were.<br><br>Online, the app looks up the <b>definition, synonyms, opposites, and look-alikes</b> and starts quizzing you. Offline, it saves the word and looks it up as soon as you’re back online.`],
+  ['Words & Progress', `<b>Words</b> lists everything, with dots showing how well you know each word (5 dots = mastered). Tap a word for its card.<br><br><b>Progress</b> shows your accuracy and which analogy bridges need work. Every right answer climbs you higher — from Basecamp toward Everest.`],
+  ['Pace on test day', `With 1.5× time you get about <b>30 seconds per synonym</b> and <b>60 seconds per analogy</b>. Finishing early means you rushed — go back and check.<br><br>Tap <b>?</b> on the Climb screen any time to see these tips again.`]
+];
+function openHelp(i = 0) {
+  const [t, body] = HELP[i]; const last = i === HELP.length - 1;
+  $('#sheet').innerHTML = `<div class="sheet-in help"><div class="topline"><div class="kicker">How it works · ${i + 1} of ${HELP.length}</div><button class="ghost" data-act="helpdone">Skip</button></div>
+    <h2>${t}</h2><p>${body}</p>
+    <div class="hdots">${HELP.map((_, k) => `<i class="${k === i ? 'on' : ''}"></i>`).join('')}</div>
+    <div class="hnav">${i ? `<button class="ghost" data-act="help" data-i="${i - 1}">Back</button>` : '<span></span>'}
+    <button class="cta" data-act="${last ? 'helpdone' : 'help'}" data-i="${i + 1}">${last ? 'Start climbing' : 'Next'}</button></div></div>`;
+  $('#sheet').classList.add('on');
+}
+
+// ---------- updates: check every time the app opens or comes back to the front ----------
+let swReg = null;
+function checkUpdate(manual) {
+  if (!swReg || !navigator.onLine) { if (manual) toast(navigator.onLine ? 'Up to date' : 'Offline — try again when online'); return; }
+  swReg.update().then(() => { if (manual && !swReg.installing && !swReg.waiting) toast(`Up to date (v${APP_VERSION})`); }).catch(() => {});
+}
 
 // ---------- export helpers ----------
 function download(name, text) {
@@ -460,5 +520,11 @@ function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('o
 // ---------- boot ----------
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') save(); });
 render(); retryPending();
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+if (!S.ui.helpSeen) openHelp(0);
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').then(r => { swReg = r; checkUpdate(); }).catch(() => {});
+  // a new version took over: reload once so the new files are used (your place is saved)
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (reloaded || !navigator.serviceWorker.controller) return; reloaded = true; save(); location.reload(); });
+}
 })();
