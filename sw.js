@@ -1,7 +1,7 @@
 // Offline cache for SSAT Climb.
 // Strategy: when online, always fetch the latest files (so every launch is up to date);
 // when offline or the network is slow, fall back to the saved copy.
-const VERSION = 'climb-v1.1';
+const VERSION = 'climb-v1.2';
 const SHELL = ['./', 'index.html', 'app.js', 'data.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => {

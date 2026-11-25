@@ -91,6 +91,13 @@ h2{font-size:22px;margin:6px 0 12px;letter-spacing:-.01em}
 .brrow{display:grid;grid-template-columns:120px 1fr 44px;align-items:center;gap:10px;margin-top:10px;font-size:14px}.brrow small{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
 .parent summary{font-weight:700;cursor:pointer}
 p.ok{color:var(--ok);font-weight:600}p.no{color:var(--no);font-weight:600}
+.rateq{margin:14px 2px 8px;font-weight:600}
+.rate{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.rate button{padding:14px 10px;border-radius:14px;border:1.5px solid var(--line);background:var(--panel);font-weight:700;text-align:center;font-size:16px}
+.rate .r-dont{color:var(--no)}.rate .r-know{color:var(--ok)}.rate .r-guess{color:#b7791f}.rate .r-unsure{color:var(--muted)}
+.rate button.on{color:#fff;border-color:transparent}.rate .r-dont.on{background:var(--no)}.rate .r-know.on{background:var(--ok)}.rate .r-guess.on{background:#b7791f}.rate .r-unsure.on{background:var(--muted)}
+.explain{display:block;margin:10px auto 0;text-align:center;font-size:16px}
+.shead .back{padding:6px 10px;font-size:15px}.shead .back:disabled{opacity:.35}
 .trapmsg{background:var(--no-bg);color:var(--ink);border-radius:12px;padding:10px 12px;margin:6px 0;font-size:15px}
 .qbtn{width:34px;height:34px;border-radius:50%;background:var(--chip);font-weight:800;text-align:center;font-size:17px;color:var(--ink)}
 .help h2{margin-top:14px}.help p{font-size:17px;line-height:1.5}
