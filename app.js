@@ -2,7 +2,7 @@
 (() => {
 'use strict';
 const KEY = 'climb.v1';
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.3';
 const TEST_DAY = new Date(2026, 11, 12);
 const DAY = 86400000;
 const INTERVALS = [0, 1, 2, 4, 7, 14]; // days per Leitner box
@@ -122,6 +122,13 @@ function anaQueue(n) {
   }).sort((x, y) => y.score - x.score).slice(0, n).map(x => ({ kind: 'ana', id: x.id, order: shuffle([0,1,2,3,4]), bridge: null, picked: null, t0: null, ms: null }));
 }
 
+// Words still to sort: never sorted and never practiced (words you've already answered keep their progress).
+// Test 1 words first, then words you added, then the common SSAT words.
+function toSort() {
+  const rank = e => e.src === 't1' ? 0 : isMine(e.w) ? 1 : 2;
+  return allEntries().filter(e => { const p = S.words[e.w]; return quizzable(e) && !(p && (p.triage || p.right + p.wrong > 0)); })
+    .sort((a, b) => rank(a) - rank(b));
+}
 // ---------- sessions ----------
 function newSession(type) {
   let items = [];
@@ -136,7 +143,7 @@ function newSession(type) {
     words.forEach((w, i) => { mixed.push(genWordQ(w)); if (i % 2 === 1 && anas.length) mixed.push(anas.shift()); });
     items = items.concat(mixed, anas);
   }
-  if (type === 'triage') items = window.WORDS.filter(e => e.src === 't1' && !ws(e.w).triage).map(e => ({ kind: 'triage', w: e.w }));
+  if (type === 'triage') items = toSort().slice(0, 20).map(e => ({ kind: 'triage', w: e.w }));
   S.sessions[type] = { type, items, i: 0, gained: 0, right: 0, total: 0, done: !items.length };
   save();
   return S.sessions[type];
@@ -170,7 +177,7 @@ function altInfo() {
 const daysLeft = () => Math.max(0, Math.ceil((TEST_DAY - new Date(new Date().toDateString())) / DAY));
 
 views.home = () => {
-  const al = altInfo(); const tri = window.WORDS.filter(e => e.src === 't1' && !ws(e.w).triage).length;
+  const al = altInfo(); const tri = toSort().length;
   const td = cur('today'); const standalone = window.navigator.standalone || matchMedia('(display-mode: standalone)').matches;
   const help = Object.values(S.custom).filter(e => e.lookup === 'failed').length;
   return `
@@ -183,7 +190,7 @@ views.home = () => {
   </header>
   ${!standalone ? `<div class="card tip">Install first: in Safari tap <b>Share → Add to Home Screen</b>, then study only from the home-screen icon. Progress made in Safari won’t carry over.</div>` : ''}
   <button class="cta" data-act="start" data-type="today">${td ? 'Resume today’s climb' : 'Start today’s climb'}<small>${td ? `${td.i + 1} of ${td.items.length}` : '~15 min · words + analogies'}</small></button>
-  ${tri ? `<button class="card row" data-act="start" data-type="triage"><b>Sort your Test 1 words</b><span>${tri} left · know it / sort of / no idea</span></button>` : ''}
+  ${tri ? `<button class="card row" data-act="start" data-type="triage"><b>Sort your words</b><span>${tri} left · 20 at a time · know it / sort of / no idea</span></button>` : ''}
   ${help ? `<button class="card row warn" data-go="words" data-filter="help"><b>${help} word${help>1?'s':''} couldn’t be looked up</b><span>Check spelling, or ask Dad to send them to Claude</span></button>` : ''}
   <div class="grid2">
     <button class="card tile" data-go="syn"><b>Synonyms</b><span>10 questions</span></button>
@@ -199,7 +206,7 @@ function sessionView(type, title) {
   if (!s) {
     const last = S.sessions[type];
     if (last && last.done && last.total) return type === 'triage'
-      ? `<div class="done"><div class="kicker">All sorted</div><h1>${last.total} words</h1><p>The ones you didn’t know now show up first in practice.</p><button class="cta" data-act="start" data-type="today">Start today’s climb</button><button class="ghost wide" data-go="home">Back to basecamp</button></div>`
+      ? `<div class="done"><div class="kicker">${toSort().length ? 'Round sorted' : 'All sorted'}</div><h1>${last.total} words</h1><p>The ones you didn’t know now show up first in practice.${toSort().length ? ` ${toSort().length} words left to sort.` : ''}</p>${toSort().length ? `<button class="cta" data-act="again" data-type="triage">Sort 20 more</button>` : ''}<button class="${toSort().length ? 'ghost wide' : 'cta'}" data-act="start" data-type="today">Start today’s climb</button><button class="ghost wide" data-go="home">Back to basecamp</button></div>`
       : doneView(type, title, last);
     s = newSession(type);
     if (s.done) return `<div class="card">Nothing to do here right now.</div>`;
@@ -222,7 +229,8 @@ function itemView(type, it) {
   if (it.kind === 'learn') return learnCard(it.w, `<button class="cta" data-act="next" data-type="${type}">Got it</button>`, 'New word');
   if (it.kind === 'triage') {
     const e = entry(it.w);
-    return `<div class="qcard"><div class="kicker">From your Test 1 misses</div><div class="stem big">${esc(e.w.toUpperCase())}</div>
+    const src = e.src === 't1' ? 'From your Test 1 misses' : isMine(e.w) ? 'A word you added' : 'Common SSAT word';
+    return `<div class="qcard"><div class="kicker">${src}</div><div class="stem big">${esc(e.w.toUpperCase())}</div>
       <p class="muted">Do you know this word?</p></div>
       <div class="tri"><button data-act="tri" data-type="${type}" data-v="known">Know it</button><button data-act="tri" data-type="${type}" data-v="sort">Sort of</button><button data-act="tri" data-type="${type}" data-v="no">No idea</button></div>`;
   }
@@ -404,7 +412,7 @@ document.addEventListener('click', ev => {
       tickDay(); save(); render(); break; }
     case 'tri': {
       const v = el.dataset.v; const p = ws(it.w); p.triage = v; const first = !it.v; it.v = v;
-      if (v === 'known') { p.box = 3; p.due = now() + 4 * DAY; p.intro = true; }
+      if (v === 'known') { p.box = Math.max(p.box, 3); p.due = now() + 4 * DAY; p.intro = true; }
       if (v === 'sort') { p.box = 1; p.due = now(); }
       if (v === 'no') { p.box = 0; p.due = now(); }
       if (first) s.total++; advance(type); break; }
@@ -519,7 +527,7 @@ $('#sheet').addEventListener('click', ev => { if (ev.target.id === 'sheet' && !$
 const HELP = [
   ['Welcome to SSAT Climb', `Your verbal trainer for the SSAT: <b>synonyms, analogies, and words you don’t know yet</b>. About 15–30 minutes a day, alongside your prep book.<br><br>It works <b>with no internet</b> once it’s installed, and it always remembers exactly where you stopped.`],
   ['Today’s climb', `The big orange button on the Climb screen. Each round mixes <b>new word cards</b>, <b>synonym questions</b>, and <b>analogies</b>, picked from what you need most.<br><br>Missed words come back sooner. Words you know show up less often.`],
-  ['Sort your Test 1 words', `These are words from questions you missed on your practice test. For each one, tap <b>Know it</b>, <b>Sort of</b>, or <b>No idea</b>. Be honest — the ones you don’t know get practiced first.`],
+  ['Sort your words', `Go through the words 20 at a time — words from your practice test first, then common SSAT words. Tap <b>Know it</b> (starts at 3 of 5 dots; checked again in 4 days), <b>Sort of</b> (1 dot; practiced soon), or <b>No idea</b> (0 dots; you get a learning card first). Be honest — the ones you don’t know get practiced first.`],
   ['Synonyms', `Pick the word that means the same thing. <b>Read all five choices</b> before tapping.<br><br>Watch for traps: an <b>opposite</b> of the word, or a word that <b>looks or sounds alike</b> (dubious vs. devious). The app tells you when you fell for one.<br><br>After each answer, tell the app how well you know the word: <b>Don’t know it</b>, <b>Guessed</b>, <b>Unsure</b>, or <b>Know it</b>. That decides when it comes back — “Know it” twice in a row marks it mastered. Tap <b>Explain</b> to see why an answer is right.`],
   ['Analogies: bridge first', `<b>Step 1:</b> before you see the choices, pick how the two words are related — the “bridge.”<br><b>Step 2:</b> try that exact bridge on every choice.<br><br>Changed your mind? <b>Change my bridge / answer</b> lets you redo it. <b>‹ Back</b> at the top lets you look at earlier questions.<br><br>The Bridge guide (Analogies screen, top right) lists all 15 bridges with examples.`],
   ['Add a word — anytime', `See a word you don’t know — in your book, a practice test, anywhere? Tap the orange <b>＋ Word</b> button in the bottom bar. It works on every screen, even in the middle of a question, and you land right back where you were.<br><br>Online, the app looks up the <b>definition, synonyms, opposites, and look-alikes</b> and starts quizzing you. Offline, it saves the word and looks it up as soon as you’re back online.`],
