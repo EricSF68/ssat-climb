@@ -2,10 +2,14 @@
 (() => {
 'use strict';
 const KEY = 'climb.v1';
-const APP_VERSION = '1.3';
+const APP_VERSION = '1.4';
 const TEST_DAY = new Date(2026, 11, 12);
 const DAY = 86400000;
-const INTERVALS = [0, 1, 2, 4, 7, 14]; // days per Leitner box
+// Word levels (dots): 0 = don't know it, 1 = not sure, 2 = I know it, 3 = mastered (a 2-dot word confirmed correct again)
+const LV_DAYS = [0, 1, 3, 10];           // when a word at each level is due again
+const LV_WEIGHT = [10, 6, 1.5, 0.3];     // how likely a word at each level is to be picked; not-yet-sorted words = 4
+const LV_NAME = ['Don’t know it', 'Not sure', 'I know it', 'Mastered'];
+const GOAL_END = new Date(2026, 11, 6);  // daily target finishes every word by the end of Sun Dec 6 (10 days from Nov 27)
 const SUMMITS = [[0,'Basecamp'],[1917,'Mt. Washington'],[4806,'Mont Blanc'],[5895,'Kilimanjaro'],[6190,'Denali'],[6961,'Aconcagua'],[8849,'Everest']];
 const POS = {n:'noun', v:'verb', adj:'adjective', adv:'adverb'};
 const $ = s => document.querySelector(s);
@@ -18,13 +22,18 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 
 // ---------- state ----------
 function fresh() {
-  return { v: 1, words: {}, custom: {}, mine: {}, anaRate: {}, stats: { alt: 0, streak: 0, lastDay: null, days: {}, syn: [], ana: [], bridge: {} },
+  return { v: 1, scale: 3, words: {}, custom: {}, mine: {}, anaRate: {}, gloss: {}, daily: null, stats: { alt: 0, streak: 0, lastDay: null, days: {}, syn: [], ana: [], bridge: {} },
            sessions: {}, ui: { view: 'home' } };
 }
-let S;
-try { S = JSON.parse(localStorage.getItem(KEY)) || fresh(); } catch (e) { S = fresh(); }
-S = Object.assign(fresh(), S);
-S.stats = Object.assign(fresh().stats, S.stats); S.mine = S.mine || {}; S.anaRate = S.anaRate || {};
+let S, raw = null;
+try { raw = JSON.parse(localStorage.getItem(KEY)); } catch (e) {}
+S = Object.assign(fresh(), raw || {});
+S.stats = Object.assign(fresh().stats, S.stats); S.mine = S.mine || {}; S.anaRate = S.anaRate || {}; S.gloss = S.gloss || {};
+// One-time move from the old 0–5 dots to the new 0–3 scale: 0→0, 1–2→1, 3→2, 4–5→3
+if (raw && raw.scale !== 3) {
+  Object.values(S.words).forEach(p => { if (p.lv == null) { const b = p.box || 0; p.lv = b === 0 ? 0 : b <= 2 ? 1 : b === 3 ? 2 : 3; } delete p.box; });
+  S.scale = 3;
+}
 function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
 
 // ---------- word bank ----------
@@ -33,9 +42,14 @@ const entry = w => S.custom[w] || BASE[w];
 const isMine = w => !!(S.custom[w] || S.mine[w]);
 const allEntries = () => [...window.WORDS, ...Object.values(S.custom).filter(e => !BASE[e.w])];
 function ws(w) { // per-word progress
-  if (!S.words[w]) S.words[w] = { box: 0, due: 0, right: 0, wrong: 0, intro: false, triage: null };
+  if (!S.words[w]) S.words[w] = { lv: 0, due: 0, right: 0, wrong: 0, intro: false, triage: null };
   return S.words[w];
 }
+// -1 = not sorted yet (never sorted, answered or added); otherwise the 0–3 level
+function status(w) { const p = S.words[w]; if (!p || (!p.triage && p.right + p.wrong === 0 && !isMine(w))) return -1; return p.lv || 0; }
+function setLv(p, lv) { p.lv = lv; p.due = now() + LV_DAYS[lv] * DAY; }
+// meaning of any answer word: a headword's definition, the built-in glossary, or one fetched online
+function glossOf(x) { const k = String(x).toLowerCase(); const e = entry(k); return (e && e.d) || (window.GLOSS || {})[k] || S.gloss[k] || ''; }
 const quizzable = e => e && ((e.s && e.s.length) || e.d);
 // related-word clusters so a distractor is never secretly a correct answer
 const cluster = new Map();
@@ -77,29 +91,18 @@ function genDef(w) {
 }
 function genWordQ(w) { const e = entry(w); return (e.s && e.s.length && Math.random() < 0.8) ? genSyn(w) : genDef(w); }
 
-// priority order for word practice
+// Weighted random pick: words you know least are far more likely to come up (Don't know 10 : Not sure 6 : not sorted 4 : Know it 1.5 : Mastered 0.3)
 function wordQueue(n) {
   const t = now();
-  const list = allEntries().filter(quizzable).map(e => {
-    const p = ws(e.w); let score = 0;
-    if (p.triage === 'known' && p.box >= 3 && p.due > t) score -= 50;
-    if (p.due <= t) score += 30;
-    if (isMine(e.w)) score += 40;
-    if (e.src === 't1') score += 25;
-    if (p.triage === 'no') score += 20;
-    if (p.wrong > p.right) score += 15;
-    score -= p.box * 6;
-    if (p.box >= 4 && p.due > t) score -= 60;
-    if (p.rate === 'know' && p.due > t) score -= 40;
-    return { w: e.w, score: score + Math.random() * 8 };
-  }).sort((a, b) => b.score - a.score);
-  return list.slice(0, n).map(x => x.w);
-}
-
-function markWord(w, ok) {
-  const p = ws(w);
-  if (ok) { p.right++; p.box = Math.min(5, p.box + 1); p.due = now() + INTERVALS[p.box] * DAY; }
-  else { p.wrong++; p.box = 0; p.due = now(); }
+  return allEntries().filter(quizzable).map(e => {
+    const st = status(e.w); const p = S.words[e.w] || {};
+    let wt = st < 0 ? 4 : LV_WEIGHT[st];
+    if (st >= 2 && p.due > t) wt *= 0.4;            // known words that aren't due yet: even less likely
+    if (isMine(e.w)) wt *= 1.5;
+    if (e.src === 't1') wt *= 1.3;
+    if (p.last && t - p.last < 15 * 60000) wt *= 0.15; // just practiced: give it a rest
+    return { w: e.w, k: Math.pow(Math.random(), 1 / wt) };
+  }).sort((a, b) => b.k - a.k).slice(0, n).map(x => x.w);
 }
 
 // ---------- analogies ----------
@@ -135,7 +138,7 @@ function newSession(type) {
   if (type === 'syn') items = wordQueue(10).map(genWordQ);
   if (type === 'ana') items = anaQueue(6);
   if (type === 'today') {
-    const learn = allEntries().filter(e => quizzable(e) && !ws(e.w).intro && (isMine(e.w) || ws(e.w).triage === 'no' || (e.src === 't1' && ws(e.w).triage !== 'known'))).slice(0, 3);
+    const learn = allEntries().filter(e => quizzable(e) && !ws(e.w).intro && status(e.w) === 0).slice(0, 3);
     items = [...learn.map(e => ({ kind: 'learn', w: e.w }))];
     const words = wordQueue(8);
     const anas = anaQueue(4);
@@ -190,7 +193,8 @@ views.home = () => {
   </header>
   ${!standalone ? `<div class="card tip">Install first: in Safari tap <b>Share → Add to Home Screen</b>, then study only from the home-screen icon. Progress made in Safari won’t carry over.</div>` : ''}
   <button class="cta" data-act="start" data-type="today">${td ? 'Resume today’s climb' : 'Start today’s climb'}<small>${td ? `${td.i + 1} of ${td.items.length}` : '~15 min · words + analogies'}</small></button>
-  ${tri ? `<button class="card row" data-act="start" data-type="triage"><b>Sort your words</b><span>${tri} left · 20 at a time · know it / sort of / no idea</span></button>` : ''}
+  ${statsCard()}
+  ${tri ? `<button class="card row" data-act="start" data-type="triage"><b>Sort your words</b><span>${tri} left · 20 at a time · don’t know / not sure / I know it</span></button>` : ''}
   ${help ? `<button class="card row warn" data-go="words" data-filter="help"><b>${help} word${help>1?'s':''} couldn’t be looked up</b><span>Check spelling, or ask Dad to send them to Claude</span></button>` : ''}
   <div class="grid2">
     <button class="card tile" data-go="syn"><b>Synonyms</b><span>10 questions</span></button>
@@ -200,6 +204,36 @@ views.home = () => {
   </div>
   <div class="card note"><b>Pace on test day (1.5×):</b> synonyms ~30 s each, analogies ~60 s each. Finishing early means you rushed. <b>Use all the time.</b></div>`;
 };
+
+// ---------- word stats + daily target ----------
+function levelCounts() {
+  const c = { '-1': 0, 0: 0, 1: 0, 2: 0, 3: 0 }; allEntries().forEach(e => c[status(e.w)]++); return c;
+}
+const points = c => c[1] + 2 * c[2] + 3 * c[3];
+function daily(c) {
+  const k = todayKey();
+  if (!S.daily || S.daily.date !== k) {
+    const total = 3 * allEntries().length, start = points(c);
+    const days = Math.max(1, Math.round((GOAL_END - new Date(new Date().toDateString())) / DAY) + 1);
+    S.daily = { date: k, start, goal: Math.max(1, Math.ceil((total - start) / days)), days }; save();
+  }
+  return S.daily;
+}
+const dots = n => n < 0 ? '<span class="dd none">–</span>' : `<span class="dd">${[1, 2, 3].map(i => `<i class="${n >= i ? 'f' : ''}"></i>`).join('')}</span>`;
+function statsCard() {
+  const c = levelCounts(), n = allEntries().length, pts = points(c), d = daily(c);
+  const done = Math.max(0, pts - d.start), dp = Math.min(100, Math.round(100 * done / d.goal)), overall = Math.round(100 * pts / (3 * n));
+  const pc = x => Math.round(100 * x / n);
+  const rows = [[3, 'Mastered', 'm3'], [2, 'I know it', 'm2'], [1, 'Not sure', 'm1'], [0, 'Don’t know it', 'm0'], [-1, 'Not sorted yet', 'mx']];
+  return `<div class="card statcard">
+    <div class="srow"><b>Today’s target</b><span>${done} / ${d.goal} dots · <b>${dp}%</b></span></div>
+    <div class="bar"><i style="width:${dp}%"></i></div>
+    <small class="muted">Resets at midnight · pace to finish every word by Sun, Dec 6${d.days > 1 ? ` (${d.days} days incl. today)` : ''}</small>
+    <div class="srow"><b>Overall learning</b><span><b>${overall}%</b> · ${pts} of ${3 * n} dots</span></div>
+    <div class="stack">${rows.map(([lv, , cls]) => `<i class="${cls}" style="width:${100 * c[lv] / n}%"></i>`).join('')}</div>
+    <div class="lvtable">${rows.map(([lv, name, cls]) => `<button data-go="words" data-filter="lv${lv}"><span class="key ${cls}"></span>${dots(lv)}<span class="nm">${name}</span><b>${c[lv]}</b><span class="pc">${pc(c[lv])}%</span></button>`).join('')}</div>
+  </div>`;
+}
 
 function sessionView(type, title) {
   let s = cur(type);
@@ -232,7 +266,7 @@ function itemView(type, it) {
     const src = e.src === 't1' ? 'From your Test 1 misses' : isMine(e.w) ? 'A word you added' : 'Common SSAT word';
     return `<div class="qcard"><div class="kicker">${src}</div><div class="stem big">${esc(e.w.toUpperCase())}</div>
       <p class="muted">Do you know this word?</p></div>
-      <div class="tri"><button data-act="tri" data-type="${type}" data-v="known">Know it</button><button data-act="tri" data-type="${type}" data-v="sort">Sort of</button><button data-act="tri" data-type="${type}" data-v="no">No idea</button></div>`;
+      <div class="tri"><button data-act="tri" data-type="${type}" data-v="dont">Don’t know it<small>0 dots</small></button><button data-act="tri" data-type="${type}" data-v="unsure">Not sure<small>1 dot</small></button><button data-act="tri" data-type="${type}" data-v="know">I know it<small>2 dots</small></button></div>`;
   }
   if (it.kind === 'syn' || it.kind === 'def') {
     const e = entry(it.w);
@@ -248,8 +282,8 @@ function itemView(type, it) {
       const trapMsg = trap === 'opposite' ? `<p class="trapmsg">Trap! “${esc(it.picked)}” is an <b>opposite</b> of ${esc(e.w)}. Test-makers love putting the opposite in the choices.</p>`
         : trap === 'lookalike' ? `<p class="trapmsg">Trap! “${esc(it.picked)}” <b>looks or sounds like</b> ${esc(e.w)} but means something different.</p>` : '';
       const head = `<div class="fb ${ok ? 'ok' : 'no'}">${ok ? '✓ Correct!' : 'Not quite'}${!ok && it.ms < 6000 ? ` — that took ${Math.round(it.ms/1000)} s. Read all five choices first.` : ''}</div>`;
-      fb = ok ? head + rateBlock(type, it, `How well do you know <b>${esc(e.w)}</b>?`) + explainBtn(type, it) + (it.explain ? wordInfo(it.w) : '')
-              : head + trapMsg + wordInfo(it.w) + rateBlock(type, it, `How well do you know <b>${esc(e.w)}</b>?`);
+      fb = ok ? head + rateBlock(type, it, `How well do you know <b>${esc(e.w)}</b>?`) + explainBtn(type, it) + (it.explain ? answerInfo(it) + wordInfo(it.w) : '')
+              : head + trapMsg + answerInfo(it) + wordInfo(it.w) + rateBlock(type, it, `How well do you know <b>${esc(e.w)}</b>?`);
     }
     return `<div class="qcard">${stem}</div><div class="choices">${ch}</div>${fb}`;
   }
@@ -278,7 +312,14 @@ function itemView(type, it) {
   }
   return '';
 }
-const RATES = [['dont', 'Don’t know it'], ['guess', 'Guessed'], ['unsure', 'Unsure'], ['know', 'Know it']];
+// The right answer's meaning (and the one you picked, if wrong)
+function answerInfo(it) {
+  const ok = it.picked === it.ans;
+  const line = (label, x) => { const g = glossOf(x); return `<p><b>${label} ${esc(x)}</b>${g ? ` — ${esc(g)}` : ''}</p>`; };
+  if (it.kind === 'def') return ok ? '' : `<div class="info ans">${line('You picked:', it.picked)}</div>`;
+  return `<div class="info ans">${line(ok ? 'Answer:' : 'Right answer:', it.ans)}${ok ? '' : `<div class="muted">${line('You picked:', it.picked)}</div>`}</div>`;
+}
+const RATES = [['dont', 'Don’t know it'], ['guess', 'Guessed'], ['unsure', 'Not sure'], ['know', 'I know it']];
 function rateBlock(type, it, q) {
   return `<p class="rateq">${q}</p><div class="rate">${RATES.map(([v, l]) => `<button class="r-${v} ${it.rate === v ? 'on' : ''}" data-act="rate" data-type="${type}" data-v="${v}">${l}</button>`).join('')}</div>
     ${it.rate ? `<button class="ghost wide" data-act="next" data-type="${type}">Next ›</button>` : ''}`;
@@ -304,23 +345,22 @@ views.words = () => {
     const p = S.words[e.w];
     if (f === 'mine') return isMine(e.w);
     if (f === 't1') return e.src === 't1';
-    if (f === 'learning') return p && (p.box < 4 || p.wrong > p.right) && (p.right + p.wrong > 0 || p.intro);
-    if (f === 'mastered') return p && p.box >= 4;
+    if (/^lv-?\d$/.test(f)) return status(e.w) === +f.slice(2);
     if (f === 'help') return e.lookup === 'failed' || e.lookup === 'pending';
     return true;
   }).sort((a, b) => isMine(b.w) - isMine(a.w) || a.w.localeCompare(b.w));
-  const tabs = [['all','All'],['mine','Added'],['t1','Test 1'],['learning','Learning'],['mastered','Mastered']];
+  const tabs = [['all','All'],['lv0','Don’t know'],['lv1','Not sure'],['lv2','Know it'],['lv3','Mastered'],['lv-1','Not sorted'],['mine','Added'],['t1','Test 1']];
   return `<div class="topline"><h2>Words</h2><button class="link" data-act="addopen">+ Add</button></div>
     <div class="seg">${tabs.map(([k, l]) => `<button class="${f === k ? 'on' : ''}" data-act="filter" data-v="${k}">${l}</button>`).join('')}</div>
-    <div class="list">${rows.map(e => { const p = S.words[e.w] || { box: 0 };
+    <div class="list">${rows.map(e => {
       const badge = e.lookup === 'pending' ? '<em class="b">looking up…</em>' : e.lookup === 'failed' ? '<em class="b no">not found</em>' : '';
-      return `<button class="wrow" data-act="word" data-w="${esc(e.w)}"><b>${esc(e.w)}</b>${badge}<span class="dots">${[1,2,3,4,5].map(i => `<i class="${p.box >= i ? 'f' : ''}"></i>`).join('')}</span></button>`; }).join('') || '<p class="muted pad">Nothing here yet.</p>'}</div>`;
+      return `<button class="wrow" data-act="word" data-w="${esc(e.w)}"><b>${esc(e.w)}</b>${badge}<span class="dots">${dots(status(e.w))}</span></button>`; }).join('') || '<p class="muted pad">Nothing here yet.</p>'}</div>`;
 };
 
 views.progress = () => {
   const al = altInfo(); const last = (a, n) => a.slice(-n); const pct = a => a.length ? Math.round(100 * a.filter(x => x.ok).length / a.length) : null;
   const syn = last(S.stats.syn, 50), ana = last(S.stats.ana, 30);
-  const counts = { m: 0, l: 0, n: 0 }; allEntries().forEach(e => { const p = S.words[e.w]; if (p && p.box >= 4) counts.m++; else if (p && (p.right + p.wrong)) counts.l++; else counts.n++; });
+  const counts = { m: levelCounts()[3] };
   const br = window.BRIDGES.map(b => { const s = S.stats.bridge[b.id] || { n: 0, c: 0, pn: 0, pc: 0 };
     return `<div class="brrow"><span>${esc(b.name)}</span><div class="mini"><i style="width:${s.n ? Math.round(100 * s.c / s.n) : 0}%"></i></div><small>${s.n ? `${s.c}/${s.n}` : '—'}</small></div>`; }).join('');
   return `<h2>Progress</h2>
@@ -353,11 +393,11 @@ function rateWord(s, it, v) {
   if (it.prev) Object.assign(p, it.prev); else it.prev = Object.assign({}, p);
   const ok = it.picked === it.ans;
   p.intro = true; if (ok) p.right++; else p.wrong++;
-  if (v === 'know') p.box = ok ? Math.min(5, Math.max(p.box + 2, 3)) : 1;   // correct + know it: skip ahead (2 in a row = mastered)
-  if (v === 'unsure') p.box = ok ? Math.min(5, p.box + 1) : 0;
-  if (v === 'guess') p.box = ok ? Math.min(p.box, 1) : 0;                     // a lucky guess doesn't count as knowing it
-  if (v === 'dont') p.box = 0;
-  p.due = now() + INTERVALS[p.box] * DAY; p.rate = v; it.rate = v;
+  const before = p.lv || 0;
+  // Your button sets the dots; the app only promotes to Mastered after a 2-dot word is answered right and marked I know it again,
+  // and a word you say you know but miss drops to Not sure.
+  setLv(p, v === 'know' ? (ok ? (before >= 2 ? 3 : 2) : 1) : v === 'unsure' ? 1 : 0);
+  p.rate = v; p.last = now(); it.rate = v;
   if (!it.requeued && (v === 'dont' || v === 'guess' || (!ok && v !== 'know'))) { requeue(s, it.w); it.requeued = true; }
 }
 function requeue(s, w) {
@@ -412,9 +452,9 @@ document.addEventListener('click', ev => {
       tickDay(); save(); render(); break; }
     case 'tri': {
       const v = el.dataset.v; const p = ws(it.w); p.triage = v; const first = !it.v; it.v = v;
-      if (v === 'known') { p.box = Math.max(p.box, 3); p.due = now() + 4 * DAY; p.intro = true; }
-      if (v === 'sort') { p.box = 1; p.due = now(); }
-      if (v === 'no') { p.box = 0; p.due = now(); }
+      if (v === 'know') { setLv(p, Math.max(p.lv || 0, 2)); p.intro = true; }
+      if (v === 'unsure') setLv(p, 1);
+      if (v === 'dont') setLv(p, 0);
       if (first) s.total++; advance(type); break; }
     case 'filter': S.ui.filter = el.dataset.v; save(); render(); break;
     case 'help': openHelp(+el.dataset.i || 0); break;
@@ -423,7 +463,7 @@ document.addEventListener('click', ev => {
     case 'word': openWord(el.dataset.w); break;
     case 'addopen': openAdd(); break;
     case 'close': closeSheet(); break;
-    case 'study': { const w = el.dataset.w; const p = ws(w); p.box = 0; p.due = now(); p.intro = false; save(); closeSheet(); render(); toast('Added to your study list'); break; }
+    case 'study': { const w = el.dataset.w; const p = ws(w); setLv(p, 0); p.triage = p.triage || 'dont'; p.intro = false; save(); closeSheet(); render(); toast('Added to your study list'); break; }
     case 'retry': lookup(el.dataset.w, true); break;
     case 'remove': { const w = el.dataset.w; if (confirm(`Remove “${w}”?`)) { delete S.custom[w]; delete S.mine[w]; delete S.words[w]; rebuildClusters(); save(); closeSheet(); render(); } break; }
     case 'export': download(`ssat-climb-backup-${todayKey()}.json`, JSON.stringify(S)); break;
@@ -450,7 +490,7 @@ document.addEventListener('submit', ev => {
   if (ev.target.id !== 'addform') return; ev.preventDefault();
   const w = $('#addw').value.trim().toLowerCase().replace(/[^a-z\- ']/g, '').replace(/\s+/g, ' ');
   if (!w) return;
-  const p = ws(w); p.box = 0; p.due = now(); p.intro = false;
+  const p = ws(w); setLv(p, 0); p.intro = false;
   if (BASE[w]) { S.mine[w] = now(); save(); $('#addres').innerHTML = `<p class="ok">Already in the bank — it’s now on your study list.</p>${wordInfo(w)}`; $('#addw').value = ''; return; }
   if (S.custom[w] && S.custom[w].lookup === 'ok') { save(); $('#addres').innerHTML = `<p class="ok">Already added — moved back to the top of your list.</p>${wordInfo(w)}`; $('#addw').value = ''; return; }
   S.custom[w] = { w, p: '', d: '', s: [], r: '', e: '', src: 'added', ts: now(), lookup: 'pending' };
@@ -503,6 +543,12 @@ async function lookup(w, ui) {
     return /^[a-z]+$/.test(t) && t !== w && f >= 1 && !derived(t) && !syns.includes(t) && !ants.includes(t) && lev(t, w) <= Math.max(2, Math.floor(w.length / 4));
   }).map(x => x.word.toLowerCase()).slice(0, 2);
   Object.assign(e, { d, p, e: ex, s: syns, a: ants, c: alikes, lookup: (d || syns.length) ? 'ok' : 'failed' });
+  // fetch meanings for the synonyms that can be used as right answers, so a miss can show what they mean
+  for (const x of syns.slice(0, 2)) {
+    if (glossOf(x)) continue;
+    const r = await get(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(x)}`);
+    if (Array.isArray(r) && r[0] && r[0].meanings) { const m = r[0].meanings.find(y => POSMAP[y.partOfSpeech] === p) || r[0].meanings[0]; const df = m.definitions && m.definitions[0]; if (df) S.gloss[x] = df.definition; }
+  }
   rebuildClusters(); save();
   if (S.ui.view === 'words' && !$('#sheet').classList.contains('on')) render();
   if (ui) openWord(w);
@@ -512,11 +558,11 @@ window.addEventListener('online', retryPending);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { retryPending(); checkUpdate(); } });
 
 function openWord(w) {
-  const e = entry(w); const p = S.words[w] || { box: 0, right: 0, wrong: 0 };
+  const e = entry(w); const p = S.words[w] || { right: 0, wrong: 0 }; const st = status(w);
   $('#sheet').innerHTML = `<div class="sheet-in"><div class="topline"><h2>${esc(w)}</h2><button class="ghost" data-act="close">✕</button></div>
     ${e.lookup === 'failed' ? `<p class="no">Not found online. Check the spelling.</p><button class="ghost wide" data-act="retry" data-w="${esc(w)}">Try lookup again</button>` : ''}
     ${e.lookup === 'pending' ? `<p class="muted">Waiting to look this up online.</p>` : ''}
-    ${wordInfo(w)}<p class="muted">Right ${p.right} · wrong ${p.wrong} · level ${p.box}/5</p>
+    ${wordInfo(w)}<p class="muted">Right ${p.right} · wrong ${p.wrong} · ${st < 0 ? 'not sorted yet' : `${st}/3 dots (${LV_NAME[st]})`}</p>
     <button class="cta" data-act="study" data-w="${esc(w)}">Study this word again</button>
     ${S.custom[w] ? `<button class="ghost wide danger" data-act="remove" data-w="${esc(w)}">Remove</button>` : ''}</div>`;
   $('#sheet').classList.add('on');
@@ -527,11 +573,11 @@ $('#sheet').addEventListener('click', ev => { if (ev.target.id === 'sheet' && !$
 const HELP = [
   ['Welcome to SSAT Climb', `Your verbal trainer for the SSAT: <b>synonyms, analogies, and words you don’t know yet</b>. About 15–30 minutes a day, alongside your prep book.<br><br>It works <b>with no internet</b> once it’s installed, and it always remembers exactly where you stopped.`],
   ['Today’s climb', `The big orange button on the Climb screen. Each round mixes <b>new word cards</b>, <b>synonym questions</b>, and <b>analogies</b>, picked from what you need most.<br><br>Missed words come back sooner. Words you know show up less often.`],
-  ['Sort your words', `Go through the words 20 at a time — words from your practice test first, then common SSAT words. Tap <b>Know it</b> (starts at 3 of 5 dots; checked again in 4 days), <b>Sort of</b> (1 dot; practiced soon), or <b>No idea</b> (0 dots; you get a learning card first). Be honest — the ones you don’t know get practiced first.`],
-  ['Synonyms', `Pick the word that means the same thing. <b>Read all five choices</b> before tapping.<br><br>Watch for traps: an <b>opposite</b> of the word, or a word that <b>looks or sounds alike</b> (dubious vs. devious). The app tells you when you fell for one.<br><br>After each answer, tell the app how well you know the word: <b>Don’t know it</b>, <b>Guessed</b>, <b>Unsure</b>, or <b>Know it</b>. That decides when it comes back — “Know it” twice in a row marks it mastered. Tap <b>Explain</b> to see why an answer is right.`],
+  ['Sort your words', `Go through the words 20 at a time — words from your practice test first, then common SSAT words. Tap <b>Don’t know it</b> (0 dots — you get a learning card first), <b>Not sure</b> (1 dot), or <b>I know it</b> (2 dots). The 3rd dot, <b>Mastered</b>, only comes when you answer a 2-dot word right again and tap I know it. Be honest — the words you know least come up most.`],
+  ['Synonyms', `Pick the word that means the same thing. <b>Read all five choices</b> before tapping.<br><br>Watch for traps: an <b>opposite</b> of the word, or a word that <b>looks or sounds alike</b> (dubious vs. devious). The app tells you when you fell for one.<br><br>After each answer, tell the app how well you know the word: <b>Don’t know it</b> or <b>Guessed</b> (0 dots), <b>Not sure</b> (1 dot), <b>I know it</b> (2 dots — or Mastered if it already had 2). Miss a word you said you know and it drops to 1 dot. When you miss, you see what the right answer and your pick mean. Tap <b>Explain</b> on a right answer to see why.`],
   ['Analogies: bridge first', `<b>Step 1:</b> before you see the choices, pick how the two words are related — the “bridge.”<br><b>Step 2:</b> try that exact bridge on every choice.<br><br>Changed your mind? <b>Change my bridge / answer</b> lets you redo it. <b>‹ Back</b> at the top lets you look at earlier questions.<br><br>The Bridge guide (Analogies screen, top right) lists all 15 bridges with examples.`],
   ['Add a word — anytime', `See a word you don’t know — in your book, a practice test, anywhere? Tap the orange <b>＋ Word</b> button in the bottom bar. It works on every screen, even in the middle of a question, and you land right back where you were.<br><br>Online, the app looks up the <b>definition, synonyms, opposites, and look-alikes</b> and starts quizzing you. Offline, it saves the word and looks it up as soon as you’re back online.`],
-  ['Words & Progress', `<b>Words</b> lists everything, with dots showing how well you know each word (5 dots = mastered). Tap a word for its card.<br><br><b>Progress</b> shows your accuracy and which analogy bridges need work. Every right answer climbs you higher — from Basecamp toward Everest.`],
+  ['Words & Progress', `The <b>Climb</b> screen shows today’s target, your overall learning, and how many words sit at each level. <b>Words</b> lists everything, with dots showing how well you know each word (3 dots = mastered). Tap a word for its card.<br><br><b>Progress</b> shows your accuracy and which analogy bridges need work. Every right answer climbs you higher — from Basecamp toward Everest.`],
   ['Pace on test day', `With 1.5× time you get about <b>30 seconds per synonym</b> and <b>60 seconds per analogy</b>. Finishing early means you rushed — go back and check.<br><br>Tap <b>?</b> on the Climb screen any time to see these tips again.`]
 ];
 function openHelp(i = 0) {
